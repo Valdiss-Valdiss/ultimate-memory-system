@@ -1,0 +1,46 @@
+# НИКОГДА не коммитить:
+
+# секреты и ключи
+.env
+*.env
+!.env.example
+*.key
+*.pem
+id_*
+.ssh/
+session/
+session*/
+
+# личные данные
+channels.json
+folders.yaml
+state/
+state_*.json
+*_state.json
+catchup_tmp/
+media/
+cache/
+
+# логи и временные файлы
+*.log
+logs/
+tmp/
+*.tmp
+__pycache__/
+*.pyc
+
+# каталоги пользователей
+.trash/
+.obsidian/
+# (Obsidian-конфиги пользователя — вне репо; настройки плагина — с осторожностью)
+
+# билд-артефакты
+build/
+dist/
+*.egg-info/
+node_modules/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini

@@ -1,0 +1,165 @@
+# docker-compose.yml — Memory System (серверная часть)
+# Все секреты — через .env (см. .env.example). НИКОГДА не коммитить реальный .env.
+# Сеть: общая bridge-сеть стека; наружу открывать только реверс-прокси (Caddy/nginx + HTTPS).
+
+name: memory-stack
+
+networks:
+  memnet:
+    driver: bridge
+
+volumes:
+  couchdb-data:
+  qdrant-data:
+  tg-cache:
+  tg-staging:
+  mirror-vault:
+  # neo4j-data:  # (запланировано: графовый слой — см. блок ниже и ARCHITECTURE.md)
+
+services:
+
+  couchdb:
+    image: couchdb:3.4
+    container_name: memory_couchdb
+    restart: unless-stopped
+    environment:
+      - COUCHDB_USER=${COUCHDB_USER}
+      - COUCHDB_PASSWORD=${COUCHDB_PASSWORD}
+    volumes:
+      - couchdb-data:/opt/couchdb/data
+    networks: [memnet]
+    # Порт наружу НЕ публиковать без HTTPS-реверс-прокси и авторизации.
+    # LiveSync-клиенты ходят через https://<домен>/couchdb (см. runbook-vps-setup).
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:5984/"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: memory_qdrant
+    restart: unless-stopped
+    environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks: [memnet]
+
+  tei:
+    # локальный сервер эмбеддингов (e5-small — лёгкий, ~2 GB RAM)
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+    container_name: memory_tei
+    restart: unless-stopped
+    command: ["--model-id", "intfloat/multilingual-e5-small", "--max-client-batch-size", "32"]
+    volumes:
+      - tei-cache:/data
+    networks: [memnet]
+
+  docling:
+    # конвертер PDF/DOCX → текст (+OCR); общий, порт 5001
+    image: quay.io/docling-project/docling-serve:latest
+    container_name: memory_docling
+    restart: unless-stopped
+    networks: [memnet]
+
+  tgapi:
+    # локальный Telegram Bot API сервер (быстрая загрузка медиа)
+    image: aiogram/telegram-bot-api:latest
+    container_name: memory_tgapi
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${API_ID}
+      TELEGRAM_API_HASH: ${API_HASH}
+    volumes:
+      - tgapi-files:/var/lib/telegram-bot-api
+    command: ["--local", "--api-id", "${API_ID}", "--api-hash", "${API_HASH}",
+              "--dir=/var/lib/telegram-bot-api"]
+    networks: [memnet]
+
+  tg_bot:
+    # watcher каналов: новые посты → staging → enrich
+    build: ./bot
+    container_name: memory_tg_bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - MIRROR_DIR=/mirror
+    volumes:
+      - tg-staging:/staging
+      - mirror-vault:/mirror
+      - tg-cache:/cache
+    depends_on: [tgapi]
+    networks: [memnet]
+
+  tg_media:
+    # загрузчик медиа-вложений по запросу конвейера
+    build: ./bot
+    container_name: memory_tg_media
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - LOCAL_TG_API_URL=http://tgapi:8081
+    volumes:
+      - tg-staging:/staging
+      - tg-cache:/cache
+    depends_on: [tgapi]
+    networks: [memnet]
+
+  indexer:
+    # семантический индекс зеркала → Qdrant (чанки ~1300 симв.)
+    build: ./bot
+    container_name: memory_indexer
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - MIRROR_DIR=/mirror
+      - TEI_URL=http://tei:80
+      - QDRANT_URL=http://qdrant:6333
+    volumes:
+      - mirror-vault:/mirror
+    depends_on: [qdrant, tei]
+    networks: [memnet]
+
+  netguard_ssh22:
+    # SSH rate-limit (см. runbook-ssh-hygiene.md); требует root-права контейнера
+    image: alpine:latest
+    container_name: netguard_ssh22
+    restart: always
+    privileged: true
+    network_mode: host
+    command: >
+      sh -c "apk add -q iptables &&
+      R0='-s ${PC_WHITELIST_IP} -p tcp --dport 22 -j ACCEPT';
+      R1='-p tcp --dport 22 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT';
+      R2='-p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set --name SSHRATE';
+      R3='-p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --name SSHRATE --seconds 60 --hitcount 9 -j DROP';
+      iptables -C INPUT $$R0 2>/dev/null || iptables -I INPUT 1 $$R0;
+      iptables -C INPUT $$R1 2>/dev/null || iptables -I INPUT 2 $$R1;
+      iptables -C INPUT $$R2 2>/dev/null || iptables -I INPUT 3 $$R2;
+      iptables -C INPUT $$R3 2>/dev/null || iptables -I INPUT 4 $$R3;
+      echo RULES-APPLIED; while true; do sleep 3600; done"
+
+  # ── ЗАПЛАНИРОВАНО (следующая версия): графовый слой ────────────────────────
+  # Включение: раскомментировать блок + добавить NEO4J_PASSWORD в .env.
+  # Имя хоста в сети зарезервировано: neo4j (bolt://neo4j:7687, внутри memnet).
+  # RAM: закладывай ~1–1.5 GiB (см. таблицу бюджета в vps/README.md).
+  #
+  # neo4j:
+  #   image: neo4j:5-community
+  #   container_name: memory_neo4j
+  #   restart: unless-stopped
+  #   environment:
+  #     - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
+  #     - NEO4J_server_memory_heap_initial__size=512m
+  #     - NEO4J_server_memory_heap_max__size=1024m
+  #     - NEO4J_server_memory_pagecache_size=256m
+  #   volumes:
+  #     - neo4j-data:/data
+  #   networks: [memnet]
+  #   # Веб-интерфейс (7474) наружу — только через реверс-прокси с авторизацией.
+  #   # Bolt (7687) — только внутри сети memnet.
+
+volumes:
+  tei-cache:
+  tgapi-files:

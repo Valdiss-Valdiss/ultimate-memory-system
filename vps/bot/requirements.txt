@@ -1,0 +1,4 @@
+telethon==1.44.0
+requests
+pypdfium2
+pillow
