@@ -31,7 +31,11 @@ services:
     # Порт наружу НЕ публиковать без HTTPS-реверс-прокси и авторизации.
     # LiveSync-клиенты ходят через https://<домен>/couchdb (см. runbook-vps-setup).
     healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:5984/"]
+      # ВАЖНО: `curl -f /_up` возвращает 401 (нужна авторизация) → docker помечает
+      # контейнер как unhealthy → внешние autoheal-механизмы (в т.ч. у хостера)
+      # начинают его перезапускать, и синк рвётся. Поэтому «жив» = сервер отвечает
+      # ЛЮБЫМ кодом (200 или 401). Меняйте только вместе с пониманием последствий.
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:5984/_up | grep -Eq '^(200|401)$'"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -122,7 +126,12 @@ services:
     networks: [memnet]
 
   netguard_ssh22:
-    # SSH rate-limit (см. runbook-ssh-hygiene.md); требует root-права контейнера
+    # SSH rate-limit (см. runbook-ssh-hygiene.md); требует root-права контейнера.
+    # Порог 30 новых соединений/60с: парольная аутентификация в sshd выключена
+    # (только ключи), поэтому порог защищает не от взлома, а от шума ботов.
+    # Если машина ходит в сеть через VPN с разными выходными IP — используйте
+    # автосинх whitelist: vps/scripts/sync-whitelist.sh + канари на ПК
+    # (pc-scripts/health_canary.py) публикуют текущий IP в заметку.
     image: alpine:latest
     container_name: netguard_ssh22
     restart: always
@@ -133,7 +142,7 @@ services:
       R0='-s ${PC_WHITELIST_IP} -p tcp --dport 22 -j ACCEPT';
       R1='-p tcp --dport 22 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT';
       R2='-p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set --name SSHRATE';
-      R3='-p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --name SSHRATE --seconds 60 --hitcount 9 -j DROP';
+      R3='-p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --name SSHRATE --seconds 60 --hitcount 30 -j DROP';
       iptables -C INPUT $$R0 2>/dev/null || iptables -I INPUT 1 $$R0;
       iptables -C INPUT $$R1 2>/dev/null || iptables -I INPUT 2 $$R1;
       iptables -C INPUT $$R2 2>/dev/null || iptables -I INPUT 3 $$R2;

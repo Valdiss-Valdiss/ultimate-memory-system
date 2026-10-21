@@ -101,7 +101,8 @@ def patch_note(path):
 
 def main():
     running = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Obsidian.exe"],
-                             capture_output=True, text=True).stdout.lower().find("obsidian.exe")
+                               capture_output=True, text=True,
+                               encoding="cp1251", errors="replace").stdout.lower().find("obsidian.exe")
     if running == -1:
         log("[!] Obsidian не запущен — внешние записи в vault запрещены. Открой Obsidian.")
         return

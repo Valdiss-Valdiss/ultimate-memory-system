@@ -1,6 +1,6 @@
-﻿"""Конвертация документов в markdown: docling-serve (VPS) + mimo file-part (сканы) + FB2.
+"""Конвертация документов в markdown: docling-serve (VPS) + mimo file-part (сканы) + FB2.
 
-Ветка «книжный конвейер» (2026-09). Docling-контейнер — общий для стека:
+Ветка «книжный конвейер» (2026-09). Docling-контейнер — общий стек n8n-install:
 не рестартим, не конфигурируем — только HTTP. OCR в docling всегда выключен
 (сканы уходят в mimo-vision): авто-OCR там выбирает EasyOCR (RAM-пик 11+ ГБ,
 известная утечка в контейнерах) — поэтому do_ocr=false на каждом запросе.
@@ -57,9 +57,9 @@ def cap_text(text, limit=DOC_TEXT_CAP):
 # --- LLM (mimo-v2.5 через zen/go/v1, как в yt_enrich) -----------------------
 
 def llm_chat(parts, max_tokens=1500, system=None):
-    """Возвращает (текст, None) или (None, ошибка)."""
-    key = ye.llm_key()
-    if not key:
+    """Возвращает (текст, None) или (None, ошибка). Внутри — ротация ключей
+    (yt_enrich.llm_call): 429/401/403 → cooldown на ключ → следующий кандидат."""
+    if not ye.llm_candidates():
         return None, "no LLM key"
     msgs = []
     if system:
@@ -67,18 +67,9 @@ def llm_chat(parts, max_tokens=1500, system=None):
     msgs.append({"role": "user", "content": parts})
     body = json.dumps({"model": ye.LLM_MODEL, "messages": msgs,
                        "max_tokens": max_tokens}).encode()
-    req = urllib.request.Request(ye.ZEN_GO + "/chat/completions", data=body, method="POST")
-    req.add_header("Authorization", "Bearer " + key)
-    req.add_header("Content-Type", "application/json")
-    req.add_header("User-Agent", "Mozilla/5.0")
-    req.add_header("x-opencode-session", ye.LLM_SESSION)
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            d = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code}: {e.read().decode(errors='replace')[:120]}"
-    except Exception as e:
-        return None, f"{type(e).__name__}: {str(e)[:120]}"
+    d, err = ye.llm_call(body)
+    if d is None:
+        return None, (err or "llm call failed")[:200]
     m = d["choices"][0]["message"]
     txt = (m.get("content") or m.get("reasoning") or m.get("reasoning_content") or "").strip()
     txt = re.sub(r"^\s*<think>.*?</think>\s*", "", txt, flags=re.S)
@@ -350,6 +341,18 @@ def convert_document(path, mime="", job_key=None):
             if full and not looks_like_scan(full):
                 return "ok", full
             return mimo_scan_text(path, mime or "application/pdf")
+    if ext in (".txt", ".text"):
+        raw = path.read_bytes()
+        decoded = None
+        for enc in ("utf-8-sig", "cp1251", "latin-1"):
+            try:
+                decoded = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if decoded is None:
+            decoded = raw.decode("latin-1")
+        return "ok", decoded
     return docling_convert(path, job_key=job_key)
 
 

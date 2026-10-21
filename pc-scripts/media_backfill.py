@@ -29,7 +29,7 @@ except Exception:
     pass
 
 CODE = Path(__file__).resolve().parent
-VAULT = Path(os.environ.get("MEMORY_VAULT_DIR", r"C:\Users\<user>\Documents\Obsidian Vault"))
+VAULT = Path(r"C:\Users\<user>\Documents\Obsidian Vault")
 TARGETS = CODE / "media_targets.json"
 STATE = CODE / "media_backfill_state.json"
 TMP = CODE / "dg_media_tmp"
@@ -363,6 +363,17 @@ async def run(limit, max_min):
                     state[key] = {"status": "error", "err": "пустой файл", "at": TODAY}
                     save_state(state)
                 print(f"[{i}/{len(todo)}] {key}: пустой файл", flush=True)
+                continue
+            if doc.size and Path(f).stat().st_size != doc.size:
+                with state_lock:
+                    state[key] = {"status": "error",
+                                  "err": f"download неполный ({Path(f).stat().st_size}/{doc.size})",
+                                  "tries": state.get(key, {}).get("tries", 0) + 1,
+                                  "at": TODAY}
+                    save_state(state)
+                print(f"[{i}/{len(todo)}] {key}: файл неполный "
+                      f"({Path(f).stat().st_size}/{doc.size} байт) — оставлен в tmp "
+                      f"для возобновления", flush=True)
                 continue
             comp, _ = await loop.run_in_executor(pool, dg.compress_audio, f)
             fut = loop.run_in_executor(pool, worker_process, t, Path(f), comp, path, key, state)

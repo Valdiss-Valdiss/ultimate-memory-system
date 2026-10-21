@@ -1,4 +1,4 @@
-﻿"""Триаж: перенос заметок из Telegram-Saved/<канал>/ в целевые папки по свойству folder.
+"""Триаж: перенос заметок из Сохраненное/Telegram/<канал>/ в целевые папки по свойству folder.
 
 Запуск: python triage_folders.py [--dry]
 - folder берётся из frontmatter (100% заметок); нет → резолв по folders.yaml → иначе пропуск.
@@ -6,7 +6,6 @@
 - Коллизии имён в целевой папке → суффикс -<msg_id>.
 - Индексы каналов (_index.md) остаются на месте. Идемпотентен.
 """
-import os
 import argparse
 import re
 import sys
@@ -15,9 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tg_common import load_folders, slugify
+import vault_guard
 
-VAULT = Path(os.environ.get("MEMORY_VAULT_DIR", r"C:\Users\<user>\Documents\Obsidian Vault"))
-ROOT = VAULT / "Inbox" / "Telegram-Saved"
+VAULT = Path(r"C:\Users\<user>\Documents\Obsidian Vault")
+ROOT = VAULT / "Inbox" / "Hermes" / "Сохраненное" / "Telegram"
 
 
 def fm_str(text, key):
@@ -29,6 +29,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true")
     args = ap.parse_args()
+    # 2026-10-21: перенос файлов = внешняя запись в vault → только при открытом
+    # Obsidian (инцидент 15–16.09). Закрыт Obsidian — ничего не двигаем.
+    if not args.dry and not vault_guard.require_obsidian(print, "triage"):
+        return
     folders = load_folders()
     moved = skipped_nofolder = collisions = 0
     for ch_dir in sorted(ROOT.iterdir()):

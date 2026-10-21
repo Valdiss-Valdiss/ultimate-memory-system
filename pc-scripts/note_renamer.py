@@ -125,7 +125,8 @@ def main():
     execute = "--execute" in sys.argv
     dry = not execute
     running = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Obsidian.exe"],
-                             capture_output=True, text=True).stdout.lower().find("obsidian.exe")
+                               capture_output=True, text=True,
+                               encoding="cp1251", errors="replace").stdout.lower().find("obsidian.exe")
     if running == -1:
         log("[!] Obsidian не запущен — переименование запрещено.")
         return

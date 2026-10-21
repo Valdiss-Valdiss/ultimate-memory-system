@@ -40,7 +40,7 @@ Modern Standby/неактивна — падает БЕЗ СЛЕДА (даже s
 
 **Фикс**: в guard-скриптах запускать python напрямую:
 ```powershell
-Start-Process -FilePath 'C:\Python314\python.exe' -ArgumentList 'script.py' `
+Start-Process -FilePath 'python' -ArgumentList 'script.py' `
   -WorkingDirectory $dir -RedirectStandardError "$dir\script_stderr.log" -WindowStyle Hidden
 ```
 

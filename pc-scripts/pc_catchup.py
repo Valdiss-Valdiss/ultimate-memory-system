@@ -1,13 +1,13 @@
-﻿"""ПК-догон: добирает посты, пропущенные вотчером (историей — только ПК-сессия умеет).
+"""ПК-догон: добирает посты, пропущенные вотчером (историей — только ПК-сессия умеет).
 
 Запуск: python pc_catchup.py
 Делает: state с VPS → новые посты → заметки (id, folder, альбомы) → обогащение
 (транскрипт + LLM-резюме + описания) → ГОТОВАЯ заметка в vault. Дублей не создаёт
 (проверка vault по msg_id). Обновлённый state возвращает на VPS.
 """
-import os
 import asyncio
 import json
+import time
 import re
 import subprocess
 import sys
@@ -18,19 +18,20 @@ from telethon import TelegramClient
 
 from tg_common import load_folders, serialize_message, slugify
 import tg_floodguard as fg
+import vault_guard
 from tg_convert import merge_albums, build_frontmatter, note_filename, render_markdown, dup_key
 from tg_common import yt_video_ids
 import yt_enrich as ye
 import yt_descriptions as yd
 
 CODE = Path(__file__).resolve().parent
-VAULT = Path(os.environ.get("MEMORY_VAULT_DIR", r"C:\Users\<user>\Documents\Obsidian Vault"))
-TG_DIR = VAULT / "Inbox" / "Telegram-Saved"
-VPS = os.environ.get("MEMORY_VPS_TARGET", "user@CHANGE-ME-server-ip")
+VAULT = Path(r"C:\Users\<user>\Documents\Obsidian Vault")
+TG_DIR = VAULT / "Inbox" / "Hermes" / "Сохраненное" / "Telegram"
+VPS = "memory@CHANGE-ME-server-ip"
 VPS_STATE = "/opt/memory-stack/tg-bot/state/state.json"
 VPS_CHANNELS = "/opt/memory-stack/tg-bot/channels.json"
 VPS_FOLDERS = "/opt/memory-stack/tg-bot/folders.yaml"
-VPS_KEY = os.environ.get("MEMORY_SSH_KEY", r"C:\Users\<user>\.ssh\id_ed25519")
+VPS_KEY = r"C:\Users\<user>\.ssh\id_ed25519"
 TMP = CODE / "state_vps.json"
 
 
@@ -257,6 +258,13 @@ def enrich_note(path, vid):
 async def main():
     if fg.guard_or_exit(lambda m: print(m, flush=True)):
         return
+    # 2026-10-21: запись в vault только при открытом Obsidian (инцидент 15–16.09).
+    # Guard стоит ДО коннекта к Telegram и до любых выборок — курсор не сдвигается,
+    # новые посты подхватятся в следующем прогоне.
+    if not vault_guard.require_obsidian(lambda m: print(m, flush=True), "pc_catchup"):
+        return
+    t_start = time.time()
+    MAX_RUNTIME = 25 * 60  # 25 мин — жёсткий потолок прогона (защита от висков сети)
     import subprocess as _sp
     _ps = ('Get-CimInstance Win32_Process -Filter "Name=\'python.exe\'" | '
            'Select-Object -ExpandProperty CommandLine')
@@ -286,6 +294,9 @@ async def main():
         return
     total_made = total_enriched = 0
     for did_str, info in channels.items():
+        if time.time() - t_start > MAX_RUNTIME:
+            print(f"[!] прогон достиг потолка {MAX_RUNTIME // 60} мин — продолжу в следующем часовом прогоне", flush=True)
+            break
         title = info["title"]
         last = state.get(did_str, 0)
         meta = {"channel_id": int(did_str), "title": title, "username": info.get("username")}

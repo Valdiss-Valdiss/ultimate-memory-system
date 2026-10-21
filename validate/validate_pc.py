@@ -108,6 +108,55 @@ def main():
         'задача Memory Catchup Hourly',
         'pc-scripts/README.md — установка планировщика')
 
+
+    # 8. LiveSync: автосинк включён (иначе заметки не приезжают)
+    try:
+        import json as _json
+        from pathlib import Path as _P
+        d = _json.loads((_P(VAULT) / '.obsidian' / 'plugins' /
+                         'obsidian-livesync' / 'data.json').read_text(encoding='utf-8'))
+        (ok if d.get('periodicReplication') else fail)(
+            'LiveSync: периодическая репликация включена',
+            'иначе заметки приезжают только по ручному нажатию — runbook-obsidian-livesync.md')
+        iv = int(d.get('periodicReplicationInterval') or 0)
+        (ok if iv >= 60 else warn)(f'LiveSync: интервал {iv} с (рекомендуется 300)')
+        (ok if d.get('syncOnStart') else warn)('LiveSync: синк при старте Obsidian')
+    except Exception as e:
+        warn(f'LiveSync: конфиг не прочитан ({type(e).__name__})')
+
+    # 9. Задачи планировщика: часовой конвейер и канари
+    for task, label in (('Memory Catchup Hourly', 'задача: часовой конвейер'),
+                         ('Memory Health Canary', 'задача: канари')):
+        rc, out, _ = sh(['schtasks', '/Query', '/TN', task], timeout=20)
+        (ok if rc == 0 else fail)(label)
+
+    # 10. Obsidian в автозагрузке (иначе синк не поднимется без пользователя)
+    rc, out, _ = sh(['reg', 'query',
+                     r'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'])
+    (ok if 'Obsidian' in out else warn)(
+        'Obsidian в автозагрузке',
+        'плагин LiveSync живёт внутри Obsidian — без автозапуска синк не идёт')
+
+    # 11. Отчёт канари: очереди должны быть нулевыми
+    try:
+        import re as _re
+        note = os.path.join(vault, 'Inbox', 'AI', 'Status', 'health.md')
+        if os.path.exists(note):
+            txt = open(note, encoding='utf-8', errors='replace').read()
+            m = _re.search(r'\u041e\u0447\u0435\u0440\u0435\u0434\u0438 '
+                           r'\u0431\u044d\u043a\u0444\u0438\u043b\u043b\u0430:'
+                           r'\*\* \u0444\u043e\u0442\u043e=(\d+) '
+                           r'\u0434\u043e\u043a=(\d+)', txt)
+            if m:
+                f, d = int(m.group(1)), int(m.group(2))
+                (ok if f == 0 and d == 0 else warn)(
+                    f'очереди: фото={f} док={d}',
+                    'всплывающие цели — runbook-autonomy-and-canary.md')
+        else:
+            warn('отчёт канари не найден (Inbox/AI/Status/health.md)')
+    except Exception as e:
+        warn(f'отчёт канари не прочитан ({type(e).__name__})')
+
     print('──────────────────────────')
     print(f'ИТОГО: OK={len(PASS)} FAIL={len(FAIL)} WARN={len(WARN)}')
     sys.exit(len(FAIL))

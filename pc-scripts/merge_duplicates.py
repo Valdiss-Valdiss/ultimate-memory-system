@@ -1,9 +1,8 @@
-﻿"""Слияние дублей: Telegram-Saved/<канал>/*.md vs целевые папки.
+"""Слияние дублей: Сохраненное/Telegram/<канал>/*.md vs целевые папки.
 
 Если заметка есть в обоих местах — в целевую пишется БОГАТАЯ версия (с транскриптом),
-копия во входной папке удаляется (LiveSync разнесёт удаление на mirror/телефон).
+копия в Сохраненное удаляется (LiveSync разнесёт удаление на mirror/телефон).
 """
-import os
 import re
 import sys
 from pathlib import Path
@@ -13,8 +12,8 @@ try:
 except Exception:
     pass
 
-VAULT = Path(os.environ.get("MEMORY_VAULT_DIR", r"C:\Users\<user>\Documents\Obsidian Vault"))
-ROOT = VAULT / "Inbox" / "Telegram-Saved"
+VAULT = Path(r"C:\Users\<user>\Documents\Obsidian Vault")
+ROOT = VAULT / "Inbox" / "Hermes" / "Сохраненное" / "Telegram"
 TRANSCRIBABLE = {"voice", "video", "video_note", "audio", "document"}
 
 

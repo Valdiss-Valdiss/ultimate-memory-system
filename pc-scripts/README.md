@@ -20,7 +20,7 @@
 | Переменная | Пример | Кто использует |
 |---|---|---|
 | `MEMORY_VAULT_DIR` | `C:\Users\<user>\Documents\Obsidian Vault` | почти все скрипты |
-| `MEMORY_VPS_TARGET` | `user@203.0.113.10` | pc_catchup, бэкфиллы (state-обмен) |
+| `MEMORY_VPS_TARGET` | `user@example.com` | pc_catchup, бэкфиллы (state-обмен) |
 | `MEMORY_SSH_KEY` | `C:\Users\<user>\.ssh\id_ed25519` | SSH-вызовы |
 
 Альтернатива: отредактировать константы в скриптах (помечены `CHANGE-ME`).
@@ -52,6 +52,21 @@ python note_renamer.py --execute >> catchup.log 2>&1
 
 Порядок важен: catchup → разложить → поднять бэкфиллы → переименовать.
 `backfill_autorestart.ps1` поднимает бэкфиллы, ЕСЛИ они не запущены (single client).
+
+## Новые модули (автономность)
+
+| Файл | Зачем |
+|---|---|
+| `vps_ssh.py` | Одно постоянное SSH-соединение (paramiko) на весь прогон — вместо 5–6 новых на каждый файл. Снимает rate-limit и «banner storm» |
+| `vault_guard.py` | Запрет писать в vault при закрытом Obsidian. Подключён в `pc_catchup` (до выборок, курсор не двигается) и `triage_folders` |
+| `health_canary.py` | Канари: раз в час проверяет всю цепочку, пишет отчёт в `Inbox/AI/Status/health.md` (в vault). Запуск вручную: `python health_canary.py` |
+| `check_health.py` | Быстрая сводка состояния ПК (очереди, процессы, cooldown) |
+| `media_re_summary.py` | Догенерация пустых медиа-резюме (по транскрипту, а при его отсутствии — по тексту поста) |
+
+**Задачи Windows**: «Memory Catchup Hourly» — часовая цепочка; «Memory Health
+Canary» — канари. Обе должны быть включены; у часовой задачи важно
+`StartWhenAvailable` (добирает пропущенные прогоны после сна).
+
 
 ## Правила эксплуатации (для юзера)
 

@@ -14,7 +14,7 @@ from pathlib import Path
 import os
 
 from tg_common import SCRIPT_DIR
-from yt_enrich import OUT, ZEN_GO, LLM_MODEL, LLM_SESSION, llm_key, llm_translate
+from yt_enrich import OUT, llm_key, llm_candidates, llm_call, LLM_MODEL
 
 
 def yt_key():
@@ -69,8 +69,7 @@ def yt_comments(vid, max_results=15):
 
 
 def llm_guess_summary(title, description, comments):
-    key = llm_key()
-    if not key:
+    if not llm_candidates():
         return ""
     parts = [f"Название видео: {title}"]
     if description:
@@ -85,20 +84,13 @@ def llm_guess_summary(title, description, comments):
         ],
         "max_tokens": 1200,
     }).encode()
-    req = urllib.request.Request(ZEN_GO + "/chat/completions", data=body, method="POST")
-    req.add_header("Authorization", "Bearer " + key)
-    req.add_header("Content-Type", "application/json")
-    req.add_header("User-Agent", "Mozilla/5.0")
-    req.add_header("x-opencode-session", LLM_SESSION)  # обязателен с 2026-09
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            d = json.loads(resp.read().decode())
-        msg = d["choices"][0]["message"]
-        txt = (msg.get("content") or msg.get("reasoning_content") or "").strip()
-        return re.sub(r"\s+", " ", txt)
-    except Exception as e:
-        print(f"    LLM guess error: {type(e).__name__}: {str(e)[:80]}", flush=True)
+    d, err = llm_call(body)
+    if d is None:
+        print(f"    LLM guess error: {str(err)[:110]}", flush=True)
         return ""
+    msg = d["choices"][0]["message"]
+    txt = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+    return re.sub(r"\s+", " ", txt)
 
 
 WARNING = "- **Резюме:** ⚠️ транскрипт недоступен (нет субтитров у видео — даже автоматических)"

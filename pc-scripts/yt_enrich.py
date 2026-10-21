@@ -1,12 +1,12 @@
-﻿"""Обогатитель YouTube: транскрипты → секции в заметках.
+"""Обогатитель YouTube: транскрипты → секции в заметках.
 
 python yt_enrich.py --limit 20     # пилот: 20 новых видео
 python yt_enrich.py                # все остальные
 
-Источник: бесплатная библиотека youtube-transcript-api .
+Источник: бесплатная библиотека youtube-transcript-api (как в рабочем скилле Hermes).
 Метаданные (название/автор) — YouTube oEmbed, бесплатно.
-TranscriptAPI — запасной путь (нужен настоящий ключ в .env; значения вида
-"PREFIX:..." могут быть ссылками на keyring — код такие пропускает).
+TranscriptAPI — запасной путь (нужен настоящий ключ в .env; значение из hermes-env
+вида "HERMES:..." — это ссылка keyring, не ключ).
 
 Заметки с `youtube:` в frontmatter получают:
 - после тела:  ## 📺 <название> (автор, ссылка, резюме-выжимка)
@@ -33,14 +33,14 @@ TRANSCRIPTAPI = "https://transcriptapi.com/api/v2/youtube/transcript"
 
 def get_key():
     env_key = os.environ.get("TRANSCRIPTAPI_KEY", "").strip()
-    if env_key and not env_key.upper().startswith("KEYRING"):
+    if env_key and not env_key.upper().startswith("HERMES"):
         return env_key
     env_path = SCRIPT_DIR / ".env"
     if env_path.exists():
         for line in env_path.read_text(encoding="utf-8-sig").splitlines():
             if "=" in line and line.split("=", 1)[0].strip() == "TRANSCRIPTAPI_KEY":
                 key = line.split("=", 1)[1].strip()
-                if key and not key.upper().startswith("KEYRING"):
+                if key and not key.upper().startswith("HERMES"):
                     return key
     return None
 
@@ -120,7 +120,7 @@ LLM_SESSION = os.environ.get("LLM_SESSION", "memory-system-notes")  # обяза
 
 def llm_key():
     env_key = os.environ.get("LLM_KEY", "").strip()
-    if env_key and not env_key.upper().startswith("KEYRING"):
+    if env_key and not env_key.upper().startswith("HERMES"):
         return env_key
     env_path = SCRIPT_DIR / ".env"
     if env_path.exists():
@@ -138,10 +138,168 @@ def llm_key():
     return None
 
 
+KEY_STATE_FILE = os.environ.get("LLM_KEY_STATE_FILE") or (
+    "/app/state/llm_key_cooldown.json" if os.path.isdir("/app/state")
+    else str(Path(__file__).resolve().parent / "llm_key_cooldown.json"))
+KEY_COOLDOWN_HOURS = float(os.environ.get("LLM_KEY_COOLDOWN_HOURS", "168"))
+KEY_PROBE_MIN_HOURS = float(os.environ.get("LLM_KEY_PROBE_MIN_HOURS", "6"))
+
+
+def _env_or_dotenv(var):
+    k = os.environ.get(var, "").strip()
+    if k:
+        return k
+    env_path = SCRIPT_DIR / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8-sig").splitlines():
+            if "=" in line and line.split("=", 1)[0].strip() == var:
+                k = line.split("=", 1)[1].strip()
+                if k:
+                    return k
+    return ""
+
+
+def llm_candidates():
+    """Ordered candidates [(label, key)]: LLM_KEY_1, LLM_KEY_2, LLM_KEY, auth.json.
+    Dedupe by key value (first label wins); labels are safe for logs/state file."""
+    out = []
+    seen = set()
+    for var in ("LLM_KEY_1", "LLM_KEY_2", "LLM_KEY"):
+        k = _env_or_dotenv(var)
+        if k and k not in seen:
+            seen.add(k)
+            out.append((var, k))
+    auth = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+    if auth.exists():
+        try:
+            a = json.loads(auth.read_text(encoding="utf-8"))
+            k = (a.get("opencode-go") or {}).get("key")
+            if k and k not in seen:
+                seen.add(k)
+                out.append(("AUTH_JSON", k))
+        except Exception:
+            pass
+    return out
+
+
+def _cooldown_load():
+    try:
+        d = json.loads(open(KEY_STATE_FILE, encoding="utf-8").read())
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _cooldown_save(reg):
+    try:
+        p = Path(KEY_STATE_FILE)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def _state_entry(label):
+    d = _cooldown_load().get(label)
+    if isinstance(d, dict):
+        return d
+    return {}
+
+
+def mark_cooldown(label, note=""):
+    reg = _cooldown_load()
+    now = time.time()
+    reg[label] = {"until": now + KEY_COOLDOWN_HOURS * 3600,
+                  "probe_after": now + KEY_PROBE_MIN_HOURS * 3600,
+                  "ts": now, "note": str(note)[:120]}
+    _cooldown_save(reg)
+
+
+def clear_cooldown(label):
+    reg = _cooldown_load()
+    if label in reg:
+        reg.pop(label)
+        _cooldown_save(reg)
+
+
+def pick_keys():
+    """Available first (priority order), cooled sorted by earliest expiry."""
+    cands = llm_candidates()
+    now = time.time()
+    free, cooled = [], []
+    for label, key in cands:
+        until = float(_state_entry(label).get("until", 0))
+        (cooled if until > now else free).append((label, key, until))
+    cooled.sort(key=lambda x: x[2])
+    return [(l, k) for l, k, _ in free] + [(l, k) for l, k, _ in cooled]
+
+
+def _chat_once(body_bytes, key, timeout=300):
+    """Одна попытка с данным ключом. (parsed_json, None) или (None, err, http_code)."""
+    req = urllib.request.Request(ZEN_GO + "/chat/completions", data=body_bytes, method="POST")
+    req.add_header("Authorization", "Bearer " + key)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "Mozilla/5.0")
+    req.add_header("x-opencode-session", LLM_SESSION)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode()), None, None
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}: {e.read().decode(errors='replace')[:120]}", e.code
+    except Exception as e:
+        return None, f"{type(e).__name__}: {str(e)[:120]}", None
+
+
+def llm_call(body_bytes, timeout=300):
+    """(parsed_json, None) или (None, err). Ротация: ключ-кандидат → 429/401/403
+    → cooldown (168 ч default) → сразу следующий ключ; сетевые/5xx ошибки
+    перебирают ключи без cooldown. Упреждающая проба первичного ключа раз в 6 ч,
+    если он в cooldown. Все источники (env/.env/auth.json) внутри одного прогона."""
+    cands = pick_keys()
+    if not cands:
+        return None, "no LLM key"
+    first = llm_candidates()
+    if first:
+        p_label, p_key = first[0]
+        st = _state_entry(p_label)
+        now = time.time()
+        if st.get("until", 0) > now and now >= float(st.get("probe_after", 0)):
+            reg = _cooldown_load()
+            pd = reg.get(p_label, {})
+            pd["probe_after"] = now + KEY_PROBE_MIN_HOURS * 3600
+            pd["probe_ts"] = now
+            reg[p_label] = pd
+            _cooldown_save(reg)
+            d, err, code = _chat_probe(p_key, timeout)
+            if d is not None:
+                clear_cooldown(p_label)
+                cands = pick_keys()
+            elif code == 429:
+                st = _cooldown_load().get(p_label, {})
+                st["probe_after"] = now + KEY_PROBE_MIN_HOURS * 3600
+                reg = _cooldown_load()
+                reg[p_label] = st
+                _cooldown_save(reg)
+    errs = []
+    for label, key in cands:
+        d, err, code = _chat_once(body_bytes, key, timeout)
+        if d is not None:
+            return d, None
+        if code in (429, 401, 403):
+            mark_cooldown(label, note=err or "")
+        errs.append(f"{label}: {err}")
+    return None, "; ".join(errs)
+
+
+def _chat_probe(key, timeout=60):
+    body = json.dumps({"model": LLM_MODEL, "max_tokens": 2,
+                       "messages": [{"role": "user", "content": "ping"}]}).encode()
+    return _chat_once(body, key, timeout)
+
+
 def llm_summary(transcript_text, fallback):
-    key = llm_key()
-    if not key:
-        return fallback
     text = re.sub(r"\s+", " ", transcript_text).strip()[:60000]
     body = json.dumps({
         "model": LLM_MODEL,
@@ -151,24 +309,16 @@ def llm_summary(transcript_text, fallback):
         ],
         "max_tokens": 1500,
     }).encode()
-    req = urllib.request.Request(ZEN_GO + "/chat/completions", data=body, method="POST")
-    req.add_header("Authorization", "Bearer " + key)
-    req.add_header("Content-Type", "application/json")
-    req.add_header("User-Agent", "Mozilla/5.0")
-    req.add_header("x-opencode-session", LLM_SESSION)  # обязателен с 2026-09 (без него: 400 MissingSessionID)
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            d = json.loads(resp.read().decode())
-        msg = d["choices"][0]["message"]
-        txt = (msg.get("content") or msg.get("reasoning_content") or "").strip()
-        txt = re.sub(r"\s+", " ", txt)
-        return txt if txt else fallback
-    except urllib.error.HTTPError as e:
-        print(f"    LLM HTTP {e.code}: {e.read().decode(errors='replace')[:80]}", flush=True)
+    d, err = llm_call(body)
+    if d is None:
+        if not llm_candidates():
+            return fallback
+        print(f"    LLM error: {str(err)[:110]}", flush=True)
         return fallback
-    except Exception as e:
-        print(f"    LLM error: {type(e).__name__}: {str(e)[:80]}", flush=True)
-        return fallback
+    msg = d["choices"][0]["message"]
+    txt = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+    txt = re.sub(r"\s+", " ", txt)
+    return txt if txt else fallback
 
 
 def key_valid(key):
@@ -212,8 +362,7 @@ def fetch_transcript(video_id):
 
 def llm_translate(text):
     """Перевод на русский, если текст не RU и не EN (иначе — без изменений). Пустая строка при сбое."""
-    key = llm_key()
-    if not key or not (text or "").strip():
+    if not llm_candidates() or not (text or "").strip():
         return text or ""
     body = json.dumps({
         "model": LLM_MODEL,
@@ -223,20 +372,13 @@ def llm_translate(text):
         ],
         "max_tokens": 3000,
     }).encode()
-    req = urllib.request.Request(ZEN_GO + "/chat/completions", data=body, method="POST")
-    req.add_header("Authorization", "Bearer " + key)
-    req.add_header("Content-Type", "application/json")
-    req.add_header("User-Agent", "Mozilla/5.0")
-    req.add_header("x-opencode-session", LLM_SESSION)  # обязателен с 2026-09
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            d = json.loads(resp.read().decode())
-        msg = d["choices"][0]["message"]
-        txt = (msg.get("content") or msg.get("reasoning_content") or "").strip()
-        return re.sub(r"\s+", " ", txt)
-    except Exception as e:
-        print(f"    LLM translate error: {type(e).__name__}: {str(e)[:80]}", flush=True)
+    d, err = llm_call(body)
+    if d is None:
+        print(f"    LLM translate error: {str(err)[:110]}", flush=True)
         return text
+    msg = d["choices"][0]["message"]
+    txt = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+    return re.sub(r"\s+", " ", txt)
 
 
 def gist(transcript, max_chars=320):

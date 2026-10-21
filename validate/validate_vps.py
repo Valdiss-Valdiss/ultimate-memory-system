@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import subprocess
+import time
 import sys
 import urllib.request
 
@@ -110,6 +111,42 @@ def main():
         (ok if use < 80 else fail)(f'диск {use}%')
     except Exception:
         warn('диск не прочитан')
+
+
+    # 7. Healthcheck CouchDB: контейнер не должен выглядеть «мёртвым»
+    #    (401 без авторизации → docker видит unhealthy → внешний autoheal рестартует
+    #     контейнер и рвёт синк клиентов).
+    rc, out, _ = sh(['docker', 'inspect', 'memory_couchdb', '--format',
+                     '{{.State.Health.Status}}'])
+    st = (out or '').strip()
+    (ok if st == 'healthy' else fail)(
+        f'CouchDB health={st or "нет"}',
+        'healthcheck должен принимать 200/401 — см. runbook-autonomy-and-canary.md')
+
+    # 8. netguard: правила SSH на месте, порог 30/60s
+    rc, out, _ = sh(['docker', 'exec', 'netguard_ssh22', 'iptables', '-L', 'INPUT',
+                     '-n'])
+    has_drop = 'SSHRATE2' in out and 'DROP' in out
+    (ok if has_drop else fail)('netguard: правило rate-limit на месте')
+    (ok if 'hit_count: 30' in out or 'hitcount 30' in out else warn)(
+        'netguard: порог 30 новых/60с (VPN-устойчивость)')
+
+    # 9. канари: отчёт в зеркале свежий (значит ПК присылает IP для whitelist)
+    canary = os.path.join(args.mirror_dir, 'Inbox', 'AI', 'Status', 'health.md')
+    if os.path.exists(canary):
+        age_h = (time.time() - os.path.getmtime(canary)) / 3600.0
+        (ok if age_h < 3 else warn)(
+            f'канари: отчёт свежий ({age_h:.1f} ч назад)',
+            'проверь задачу «Memory Health Canary» на ПК')
+    else:
+        warn('канари: отчёта нет в зеркале (Inbox/AI/Status/health.md)')
+
+    # 10. cron: обогатитель, watchdog и автосинк whitelist
+    rc, out, _ = sh(['crontab', '-l'])
+    for needle, label in (('run-enrich.sh', 'cron: обогатитель'),
+                          ('watchdog.sh', 'cron: watchdog'),
+                          ('sync-whitelist.sh', 'cron: авто-whitelist')):
+        (ok if needle in out else warn)(label)
 
     print('──────────────────────────')
     print(f'ИТОГО: OK={len(PASS)} FAIL={len(FAIL)}')

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Бэкфилл фото: vault-скан → user-сессия (read-only) → распознавание через VPS
 (convert_one.py: mimo-vision) → прямой патч заметок в vault.
 
@@ -26,12 +26,13 @@ VAULT = Path(os.environ.get("VAULT_DIR", r"C:\Users\<user>\Documents\Obsidian Va
 TMP = Path(os.environ.get("PHOTO_TMP_DIR", r"C:\Users\ADMINI~1\AppData\Local\Temp\opencode\photobf"))
 BATCH = int(os.environ.get("PHOTO_BATCH", "25"))
 LIMIT = int(os.environ.get("PHOTO_LIMIT", "0"))
-HOST = "ai-agent@CHANGE-ME-server-ip"
+HOST = "memory@CHANGE-ME-server-ip"
 KEY = r"C:\Users\<user>\.ssh\id_ed25519"
 SKIP_SIGNALS = ("## 🖼 Изображение", "has_ocr_text: true",
                 "текстовой нагрузки нет", "не обработано")
+SKIP_BENIGN = ("## 🖼 Изображение", "has_ocr_text: true", "текстовой нагрузки нет")
 HARD_SKIP = "не обработано"
-PRIORITY = ("Маркетинг/", "Рост/", "Книга/", "Дизайн/", "IT/")
+PRIORITY = ("Marketing/", "Growth/", "Books/", "Design/", "IT/")
 LOG = SCRIPT_DIR / "photos_backfill.log"
 
 env = {}
@@ -41,6 +42,7 @@ for line in (SCRIPT_DIR / ".env").read_text(encoding="utf-8-sig").splitlines():
         env[k.strip()] = v.strip()
 
 sys.path.insert(0, str(SCRIPT_DIR))
+import vps_ssh
 
 
 def log(msg):
@@ -82,6 +84,7 @@ def scan_targets():
         known = (len(re.findall(r"^## 🖼 Изображение", content, re.M))
                  + len(re.findall(r"^## 📄 Документ: ", content, re.M))
                  + content.count("текстовой нагрузки нет")
+                 + content.count("не документ (пропуск)")
                  + len(re.findall(r"- \*\*Документ:\*\* ⚠️", content, re.M)))
         if album:
             # Добор альбома (2026-09-14): миграция писала в media: только вложение
@@ -101,55 +104,59 @@ def scan_targets():
     return targets
 
 
-def ssh_run(args, timeout=900, capture=True):
-    cmd = ["ssh", "-i", KEY, "-o", "StrictHostKeyChecking=no", HOST] + args
-    return subprocess.run(cmd, capture_output=capture, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout)
-
-
 def convert_on_vps(workkey):
-    for attempt in range(2):
-        r = ssh_run(["mkdir", "-p", f"/tmp/photobf/{workkey}"], timeout=60)
-        base = TMP / workkey
-        ok_all = True
-        for name in os.listdir(base):
-            r2 = subprocess.run(
-                ["scp", "-q", "-i", KEY, "-o", "StrictHostKeyChecking=no",
-                 str(base / name), f"{HOST}:/tmp/photobf/{workkey}/{name}"],
-                capture_output=True, timeout=300)
-            if r2.returncode != 0:
-                ok_all = False
-                time.sleep(3)
-                break
-        if ok_all:
-            break
-        if attempt == 2:
-            return {"status": "error", "error": "scp upload failed"}
-    r = ssh_run(
-        ["docker", "run", "--rm", "--network", "localai_default", "--env-file", "/opt/memory-stack/tg-bot/.env", "-e", "PYTHONIOENCODING=utf-8",
-         "-v", f"/tmp/photobf/{workkey}:/w",
-         "memory-tg-tools:latest", "python", "/app/convert_one.py", "/w"],
-        timeout=600)
-    out = (r.stdout or "").strip()
-    m = re.search(r"\{.*\}", out, re.S)
-    if not m:
-        return {"status": "error", "error": (r.stderr or "no json")[:200]}
+    """Каталог ПК/TMP/<key>/ уже содержит файлы+sidecar.json → sftp на VPS → docker.
+    Транспорт — vps_ssh (одно постоянное соединение на прогон, keepalive, ретрай) —
+    как в docs_backfill с 2026-10-11: снят netguard rate-limit (9 новых/60 с)."""
+    remote = f"/tmp/photobf/{workkey}"
     try:
-        return json.loads(m.group(0))
+        rc, _, err = vps_ssh.exec_(f"mkdir -p {remote}", timeout=30)
+        if rc != 0:
+            return {"status": "error", "error": f"mkdir rc={rc} {(err or '')[:120]}"}
+        for name in os.listdir(TMP / workkey):
+            vps_ssh.put(TMP / workkey / name, remote)
+        rc, out, err = vps_ssh.exec_(
+            f"docker run --rm --network localai_default --env-file /opt/memory-stack/tg-bot/.env "
+            f"-e PYTHONIOENCODING=utf-8 -v {remote}:/w -v /opt/memory-stack/tg-bot/state:/app/state "
+            f"memory-tg-tools:latest python /app/convert_one.py /w", timeout=900)
+        out = (out or "").strip()
+        m = re.search(r"\{.*\}", out, re.S)
+        if not m:
+            return {"status": "error",
+                    "error": f"no json rc={rc} out={out[-120:]!r} err={(err or '')[-120:]!r}"}
+        try:
+            return json.loads(m.group(0))
+        except Exception as e:
+            return {"status": "error", "error": f"bad json: {e}"}
     except Exception as e:
-        return {"status": "error", "error": f"bad json: {e}"}
+        vps_ssh.close()
+        return {"status": "error", "error": f"{type(e).__name__}: {str(e)[:120]}"}
 
 
 def vps_cleanup(workkey):
-    ssh_run(["rm", "-rf", f"/tmp/photobf/{workkey}"], timeout=60, capture=False)
+    try:
+        vps_ssh.exec_(f"rm -rf /tmp/photobf/{workkey}", timeout=60)
+    except Exception:
+        vps_ssh.close()
 
 
 def patch_photo_note(path, results):
+    """Добор-режим (2026-10-20): заметка с album_size > known(секции+мемы) ДОПАТЧИВАЕТСЯ
+    — раньше любые SKIP_SIGNALS отказывали запись целиком, и недоборы циклились вечно
+    (LLM-конвертации тратились впустую). Терминальный «не обработано» всегда
+    непроходим. Отказы возвращаются с причиной — process_one их логирует."""
     content = path.read_text(encoding="utf-8")
-    if any(s in content for s in SKIP_SIGNALS):
-        return "skip"
+    album = re.search(r"^album_size: (\d+)$", content, re.M)
+    known = (len(re.findall(r"^## 🖼 Изображение", content, re.M))
+             + content.count("текстовой нагрузки нет"))
+    top_up = bool(album) and int(album.group(1)) > known
+    if HARD_SKIP in content:
+        return "skip: hard-terminal"
+    benign = any(s in content for s in SKIP_BENIGN)
+    if benign and not top_up:
+        return f"skip: already-processed (known={known}, album={album.group(1) if album else None})"
     flags = []
-    idx = len(re.findall(r"^## 🖼 Изображение", content, re.M))
+    idx = known
     sections = []
     for res in results:
         idx += 1
@@ -165,7 +172,7 @@ def patch_photo_note(path, results):
         else:
             sections.append("\n\n- **Изображение:** текстовой нагрузки нет (мем/фото) — пропуск\n")
     if not sections:
-        return "skip"
+        return "skip: no-meaningful-results"
     for fl in dict.fromkeys(flags):
         if fl not in content:
             content = content.replace("tags: [telegram]", fl + "\ntags: [telegram]", 1)
@@ -199,7 +206,32 @@ async def process_one(target, client, i, total):
                 photos = photos[consumed:]
                 log(f"[gap] {key}: {consumed} фото уже в заметке — добор {len(photos)}")
         if not photos:
-            log(f"[skip] {key}: фото нет в посте ({note.name})")
+            # 2026-10-21: в посте фото нет (удалён/вне окна).
+            # Разные пометки по смыслу:
+            #  - заметка ЖДЁТ фото (media: photo/image) → терминально «не обработано»
+            #    (файла нет и не будет — закрываем навсегда);
+            #  - заметка док-альбома (media: document) → нейтрально «не документ (пропуск)»:
+            #    учитывается в known обоих сканеров, альбом сходится, заметка не выпадает.
+            try:
+                txt = note.read_text(encoding="utf-8")
+                m = re.search(r"^media: \[([^\]]*)\]", txt, re.M)
+                types = {t.strip() for t in (m.group(1).split(",") if m else [])}
+                wants_photos = bool(types & {"photo", "image"})
+            except Exception:
+                wants_photos = True
+            if wants_photos:
+                mark = ("- **Изображение:** фото недоступны в Telegram "
+                        "(пост удалён или вне окна) — не обработано")
+            else:
+                mark = ("- **Вложение:** фото в альбоме не найдено в Telegram "
+                        "(пост удалён или вне окна) — не документ (пропуск)")
+            try:
+                txt = note.read_text(encoding="utf-8")
+                if mark not in txt:
+                    note.write_text(txt.rstrip("\n") + "\n\n" + mark + "\n", encoding="utf-8")
+            except Exception as e:
+                log(f"[warn] {key}: пометка не записана: {type(e).__name__}")
+            log(f"[skip] {key}: фото нет в посте — пометка записана ({note.name})")
             return "skip"
         wdir = TMP / workkey
         results = []
@@ -236,6 +268,7 @@ async def process_one(target, client, i, total):
             if r == "ok":
                 log(f"[+] {key} ({len(results)} фото) [{i}/{total}] ({note.name})")
                 return "done"
+            log(f"[patch-skip] {key}: {r} ({note.name})")
             return "skip"
         if errors:
             log(f"[retry-later] {key}: есть ошибки — заметка не патчилась, повтор на следующем прогоне")
@@ -280,10 +313,13 @@ PHOTO_BATCH_PAUSE_SEC = int(os.environ.get("PHOTO_BATCH_PAUSE_SEC", "90"))
 
 
 def vps_ram_avail_sync():
-    r = ssh_run(["bash", "-lc", "free -m | awk '/Mem:/{print $7}'"], timeout=45)
     try:
-        return int((r.stdout or "").strip().splitlines()[-1])
-    except (ValueError, IndexError):
+        rc, out, _ = vps_ssh.exec_("free -m | awk '/Mem:/{print $7}'", timeout=45)
+        if rc != 0:
+            return 9999
+        return int((out or "").strip().splitlines()[-1])
+    except Exception:
+        vps_ssh.close()
         return 9999
 
 

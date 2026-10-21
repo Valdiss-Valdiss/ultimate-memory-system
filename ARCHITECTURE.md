@@ -53,6 +53,21 @@
    └── Obsidian LiveSync (E2E) ↔ CouchDB ↔ CLI-цикл ↔ зеркало (self-healing, mirror-last)
 ```
 
+## Автономность и самовосстановление
+
+Система спроектирована так, чтобы переживать сон ПК, обрыв сети, смену
+IP-адреса (VPN) и тихие отказы внешних сервисов **без участия человека**.
+
+| Механизм | Что делает | Где смотреть |
+|---|---|---|
+| `pc-scripts/vps_ssh.py` | Одно постоянное SSH-соединение (paramiko, keepalive) на весь прогон вместо 5–6 новых соединений на файл. Снимает rate-limit и «banner storm» | `pc-scripts/vps_ssh.py` |
+| `pc-scripts/vault_guard.py` | Запрет записывать в vault при закрытом Obsidian (внешние правки при закрытом плагине приводили к волне удалений). Guard стоит **до** выборок: курсор Telegram не сдвигается, работа подхватится позже | `pc-scripts/vault_guard.py` |
+| `pc-scripts/health_canary.py` | Раз в час проверяет всю цепочку (IP, SSH, LLM-ключ, CouchDB, очереди, свежесть логов, бэкапы) и пишет отчёт в заметку `Inbox/AI/Status/health.md` | `pc-scripts/health_canary.py` |
+| `vps/scripts/sync-whitelist.sh` | По отчёту канари добавляет текущий публичный IP в SSH-whitelist (cron */10) — система переживает смену VPN-выхода | `vps/scripts/sync-whitelist.sh` |
+| `vps/scripts/netguard-guard.sh` | Rate-limit SSH с идемпотентным набором правил (порог 30 новых соединений/60 с; парольная аутентификация отключена) | `vps/scripts/netguard-guard.sh` |
+| Ротация LLM-ключей | Кандидаты ключей перебираются автоматически; 401/403 → cooldown, 429 → пауза. Ключи могут истекать — конвейер не должен вставать молча | `pc-scripts/yt_enrich.py` |
+| Healthcheck CouchDB «200/401 = жив» | Старая проверка `curl -f /_up` давала 401 → контейнер числился unhealthy → внешние autoheal-механизмы его перезапускали, и синк рвался | `vps/docker-compose.yml` |
+| Перезапуск с честным отчётом | Скрипты пишут причину отказа в лог (`[patch-skip]`, `[err]`, `[retry-later]`) — «молчаливых» пропусков больше нет | `pc-scripts/*.log` |
 ## Целевое состояние (то, что проверяют validate-скрипты)
 
 ### Сервер (`validate/validate_vps.py`)

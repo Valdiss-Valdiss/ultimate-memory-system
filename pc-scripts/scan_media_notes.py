@@ -3,7 +3,6 @@
 Создаёт media_targets.json: [{channel_id, msg_id, kind, duration, size, mime, note_path}].
 Запуск: python scan_media_notes.py
 """
-import os
 import asyncio
 import json
 import re
@@ -14,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from telethon import TelegramClient
 
 CODE = Path(__file__).resolve().parent
-VAULT = Path(r"C:\Users\<user>\Documents\Obsidian Vault\Inbox\Telegram-Saved")
+VAULT = Path(r"C:\Users\<user>\Documents\Obsidian Vault\Inbox\Hermes\Сохраненное\Telegram")
 OUT = CODE / "media_targets.json"
 
 TRANSCRIBABLE = {"voice", "video", "video_note", "audio"}
