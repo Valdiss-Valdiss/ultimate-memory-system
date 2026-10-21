@@ -93,12 +93,19 @@ def check_llm():
         for label, key in cands:
             d, err, code = yt_enrich._chat_once(body, key, 45)
             if d is not None:
-                return f"жив ({label})"
+                return f"жив ({label}, {yt_enrich.LLM_MODEL})"
+            txt = str(err or "")
+            # Провайдер убрал модель из каталога: конвейер молча перестаёт делать
+            # резюме/OCR. Это ломает всё обогащение — отмечаем явно.
+            if "Unsupported model" in txt or "Model is unavailable" in txt \
+                    or "does not support" in txt:
+                return (f"МОДЕЛЬ НЕДОСТУПНА ({yt_enrich.LLM_MODEL}) — "
+                        f"смени LLM_MODEL (см. runbook-llm-keys.md)")
             if code == 429:
                 return f"лимит окна ({label}:429)"
             if code in (401, 403):
                 return f"КЛЮЧ ОТКАЗАН ({label}:{code})"
-            return f"ошибка ({label}:{code} {str(err)[:60]})"
+            return f"ошибка ({label}:{code} {txt[:60]})"
         return "нет ключей"
     except Exception as e:
         return f"ошибка проверки ({type(e).__name__})"

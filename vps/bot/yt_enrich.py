@@ -114,7 +114,7 @@ def now_iso():
 
 
 ZEN_GO = "https://opencode.ai/zen/go/v1"
-LLM_MODEL = "mimo-v2.5"
+LLM_MODEL = os.environ.get("LLM_MODEL", "mimo-v2.6-flash")
 LLM_SESSION = os.environ.get("LLM_SESSION", "memory-system-notes")  # обязателен для zen/go с 2026-09: x-opencode-session
 
 
