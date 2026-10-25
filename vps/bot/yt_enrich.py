@@ -160,8 +160,11 @@ def _env_or_dotenv(var):
 
 
 def llm_candidates():
-    """Ordered candidates [(label, key)]: LLM_KEY_1, LLM_KEY_2, LLM_KEY, auth.json.
-    Dedupe by key value (first label wins); labels are safe for logs/state file."""
+    """Ordered candidates [(label, key)]: LLM_KEY_1, LLM_KEY_2, LLM_KEY.
+
+    2026-10-24: auth.json (ключ живого агента) УБРАН из кандидатов конвейера —
+    конвейер не должен выжигать квоту агентов даже в безнадёжной неделе,
+    иначе и конвейер, и агенты умирают одновременно (инцидент 11.10)."""
     out = []
     seen = set()
     for var in ("LLM_KEY_1", "LLM_KEY_2", "LLM_KEY"):
@@ -169,16 +172,6 @@ def llm_candidates():
         if k and k not in seen:
             seen.add(k)
             out.append((var, k))
-    auth = Path.home() / ".local" / "share" / "opencode" / "auth.json"
-    if auth.exists():
-        try:
-            a = json.loads(auth.read_text(encoding="utf-8"))
-            k = (a.get("opencode-go") or {}).get("key")
-            if k and k not in seen:
-                seen.add(k)
-                out.append(("AUTH_JSON", k))
-        except Exception:
-            pass
     return out
 
 

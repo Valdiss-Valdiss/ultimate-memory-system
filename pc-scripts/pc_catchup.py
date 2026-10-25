@@ -7,6 +7,7 @@
 """
 import asyncio
 import json
+import os
 import time
 import re
 import subprocess
@@ -263,6 +264,7 @@ async def main():
     # новые посты подхватятся в следующем прогоне.
     if not vault_guard.require_obsidian(lambda m: print(m, flush=True), "pc_catchup"):
         return
+    _kill_stale_catchup()
     t_start = time.time()
     MAX_RUNTIME = 25 * 60  # 25 мин — жёсткий потолок прогона (защита от висков сети)
     import subprocess as _sp
@@ -288,7 +290,18 @@ async def main():
             env[k.strip()] = v.strip()
     session = CODE / "session" / env.get("SESSION_NAME", "vault_import")
     client = TelegramClient(str(session), int(env["API_ID"]), env["API_HASH"])
-    await client.connect()
+    # 2026-10-25: коннект с таймаутом (инцидент 22.10: connect без таймаута
+    # пережил свой прогон на 2+ дня и заблокировал все последующие)
+    try:
+        await asyncio.wait_for(client.connect(), timeout=120)
+    except Exception as e:
+        print(f"[!] коннект к Telegram не удался за 120с ({type(e).__name__}) — "
+              f"выхожу, повтор в следующем прогоне", flush=True)
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return
     if not await client.is_user_authorized():
         print("[!] Сессия не авторизована")
         return
@@ -301,12 +314,13 @@ async def main():
         last = state.get(did_str, 0)
         meta = {"channel_id": int(did_str), "title": title, "username": info.get("username")}
         ch_dir = TG_DIR / slugify(title)
-        raw = []
         try:
-            async for msg in client.iter_messages(int(did_str), min_id=last, limit=None):
-                if msg.action is not None:
-                    continue
-                raw.append(serialize_message(msg, meta))
+            raw = await asyncio.wait_for(
+                _collect_channel(client, did_str, last, meta), timeout=480)
+        except asyncio.TimeoutError:
+            print(f"[!] {title}: сбор сообщений завис >8 мин — пропускаю канал "
+                  f"(доберёт следующий прогон, state не тронут)", flush=True)
+            continue
         except Exception as e:
             if fg.is_flood_error(e):
                 print(fg.set_cooldown(60, f"( flood на «{title}» )"), flush=True)
@@ -380,6 +394,41 @@ async def main():
     await client.disconnect()
     vps_state_upload(state)
     print(f"=== Итог: новых заметок {total_made} (обогащено {total_enriched}) ===")
+
+
+def _kill_stale_catchup():
+    """2026-10-25: стоп-защита от зомби (инцидент 22.10: зависший прогон держал
+    сессию SQLite и хэндл catchup.log → все последующие прогоны молча умирали).
+    Любой ЧУЖОЙ pc_catchup-процесс = зомби (задача с IgnoreNew) → убиваю."""
+    try:
+        ps = ('Get-CimInstance Win32_Process -Filter "Name=\'python.exe\'" | '
+              'Where-Object { $_.CommandLine -match \'pc_catchup\\.py\' } | '
+              'Select-Object -ExpandProperty ProcessId')
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=45).stdout or ""
+        me = os.getpid()
+        killed = []
+        for tok in out.split():
+            tok = tok.strip()
+            if tok.isdigit() and int(tok) != me:
+                subprocess.run(["taskkill", "/F", "/PID", tok],
+                               capture_output=True, timeout=30)
+                killed.append(tok)
+        if killed:
+            print(f"[!] убит зомби pc_catchup: PID {', '.join(killed)} "
+                  f"(держал сессию/лог)", flush=True)
+    except Exception as e:
+        print(f"[!] zombie-check не сработал: {type(e).__name__}", flush=True)
+
+
+async def _collect_channel(client, did_str, last, meta):
+    """Сбор сообщений одного канала (вынесено для таймаута через wait_for)."""
+    raw = []
+    async for msg in client.iter_messages(int(did_str), min_id=last, limit=None):
+        if msg.action is not None:
+            continue
+        raw.append(serialize_message(msg, meta))
+    return raw
 
 
 def shutil_move(src, dst):
