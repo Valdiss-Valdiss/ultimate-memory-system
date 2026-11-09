@@ -1,4 +1,4 @@
-"""memory_indexer: mirror (main vault) → TEI (e5-large) → Qdrant коллекция vault_main.
+"""memory_indexer: mirror (main vault) → TEI (e5-large) → Qdrant коллекция vault_main_v2 (с 2026-11-08; раньше vault_main).
 
 - Читает РАСШИФРОВАННЫЙ mirror (/srv/memory-system/vault/memory-ai) — CouchDB напрямую
   читать нельзя (LiveSync E2E-шифрование).
@@ -27,7 +27,7 @@ VAULT = Path(os.environ.get("VAULT_DIR", "/mirror"))
 STATE_DIR = Path(os.environ.get("INDEX_STATE_DIR", "/app/indexstate"))
 TEI_URL = os.environ.get("TEI_URL", "http://memory_tei:80")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-COLL = os.environ.get("QDRANT_COLLECTION", "vault_main")
+COLL = os.environ.get("QDRANT_COLLECTION", "vault_main_v2")  # v2 с 2026-11-08; откат: vault_main + index_state.json
 INTERVAL = int(os.environ.get("INDEX_INTERVAL", "300"))
 EMB_DIM = 1024
 CHUNK_CHARS = 1300  # ~512 токенов e5 для кириллицы (max_input_length модели)
@@ -37,7 +37,7 @@ HEAD_LIMIT = 1_500_000  # больше 4 МБ — индексируем «го�
 E5_PASSAGE = "passage: "
 E5_QUERY = "query: "
 
-state_path = STATE_DIR / "index_state.json"
+state_path = STATE_DIR / ("index_state.json" if COLL == "vault_main" else f"index_state_{COLL}.json")
 
 
 def load_state():
@@ -66,10 +66,12 @@ def http_json(url, body=None, headers=None, method=None, timeout=120):
 
 
 def qdrant_headers():
-    key = ""
-    for line in open("/s.env", encoding="utf-8-sig"):
-        if line.startswith("QDRANT__SERVICE__API_KEY="):
-            key = line.split("=", 1)[1].strip()
+    # ключ Qdrant: переменная окружения QDRANT_API_KEY (env_file .env) или /s.env (прод автора)
+    key = os.environ.get("QDRANT_API_KEY", "")
+    if not key and os.path.exists("/s.env"):
+        for line in open("/s.env", encoding="utf-8-sig"):
+            if line.startswith("QDRANT__SERVICE__API_KEY="):
+                key = line.split("=", 1)[1].strip()
     return {"api-key": key, "Content-Type": "application/json"}
 
 
@@ -125,14 +127,132 @@ def chunk_body(body, limit=CHUNK_CHARS):
 
 
 def make_passages(rel_path, props, body, stem):
+    # Формат v2 (2026-11-08, решение пользователя): чистый текст без служебных полей.
+    # Кусок 0: имя + канал + папка; куски 1+: имя + короткое описание заметки (контекст).
+    # Совпадает с /tmp/reemb/export.py, по которому посчитана коллекция vault_main_v2.
     chunks = chunk_body(body)
     if not chunks:
         chunks = [f"(заметка без текста) {stem}"]
-    meta = " ".join(f"{k}: {v}" for k, v in sorted(props.items()) if v)[:400]
+    head = f"{stem}. Канал: {props.get('channel', '')}. Папка: {props.get('folder', '')}."
+    ctx = _fn_desc(rel_path, 220) if len(chunks) > 1 else ""
     passages = []
     for idx, ch in enumerate(chunks):
-        passages.append(E5_PASSAGE + f"{stem}. {meta}. {ch}"[:6000])
+        pre = head if idx == 0 else f"{stem}. {ctx}"
+        passages.append(E5_PASSAGE + f"{pre} {ch}"[:6000])
     return passages
+
+
+# --- описание заметки: копия _fn_* из mcp/src/server.py (менять синхронно!) ---
+import re as _re_fn
+
+_FN_MDLINK = _re_fn.compile(r"\[([^\]]*)\]\([^)]*\)")
+_FN_SUMMARY = [_re_fn.compile(r"^- \*\*Резюме:\*\*\s*(.+)$", _re_fn.M),
+               _re_fn.compile(r"^- \*\*Резюме документа:\*\*\s*(.+)$", _re_fn.M),
+               _re_fn.compile(r"^- \*\*Описание:\*\*\s*(.+)$", _re_fn.M)]
+_FN_SKIP = ("- **", "---", "📎", "🔗", "![", "|", "```", "> ")
+
+
+_FN_EMOJI = _re_fn.compile("[\U0001F000-\U0001FFFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF\uFE0F\u200D\u20E3]")
+
+
+def _fn_clean(s: str) -> str:
+    s = _FN_MDLINK.sub(r"\1", s)
+    s = _re_fn.sub(r"https?://\S+", "", s)
+    s = _re_fn.sub(r"#[\w-]+", "", s)
+    s = _FN_EMOJI.sub("", s).replace("\u200b", "")
+    s = _re_fn.sub(r"[*_`>#]+", "", s)
+    s = _re_fn.sub(r"\s+", " ", s)
+    return s.strip(" -—:·|•")
+
+
+def _fn_cut(s: str, n: int) -> str:
+    if len(s) <= n:
+        return s
+    c = s[:n]
+    i = c.rfind(" ")
+    return (c[:i] if i > n * 0.6 else c).rstrip(" ,.;:—-") + "…"
+
+
+def _fn_field(body: str, rx) -> str:
+    m = rx.search(body)
+    if not m:
+        return ""
+    v = _fn_clean(m.group(1))
+    if not v or v.strip("_() ").lower() in ("нет", "") or _re_fn.fullmatch(r"\[.*\]", v):
+        return ""
+    return v
+
+
+def _fn_digest(rel: str) -> dict:
+    """Название и короткое резюме заметки — из её собственных полей: резюме видео/аудио и
+    документов (их сделала LLM конвейера при импорте), текст поста, описание картинки.
+    Ничего не генерирует."""
+    try:
+        text = (VAULT / rel).read_text(encoding="utf-8", errors="replace")[:30000]
+    except Exception:  # noqa: BLE001
+        text = ""
+    body = text
+    if body.startswith("---"):
+        end = body.find("\n---", 3)
+        body = body[end + 4:] if end > 0 else body
+    media_sum = _fn_field(body, _FN_SUMMARY[0]) or _fn_field(body, _FN_SUMMARY[1])
+    img_sum = _fn_field(body, _FN_SUMMARY[2])
+    title = ""
+    m = _re_fn.search(r"^## 📺 (.+)$", body, _re_fn.M)
+    if m:
+        title = _fn_clean(m.group(1))
+    rest = []
+    for line in body.splitlines():
+        ls = line.strip().replace("\u200b", "")
+        if ls == "---":
+            break  # дальше — разделы конвейера (OCR/транскрипты), это не текст поста
+        if ls.startswith("#"):
+            h = ls.lstrip("#").strip()
+            if _FN_EMOJI.search(h) or _re_fn.match(r"(Транскрипт|Описание|Текст документа|Резюме|OCR|Медиа)", h):
+                break  # служебный раздел конвейера
+            ls = h  # заголовок самого поста — это текст
+        if not ls or ls.startswith(_FN_SKIP):
+            continue
+        c = _fn_clean(ls)
+        if len(c) < 8 or c.lower().startswith(("медиа:", "автор", "источник")):
+            continue
+        if not title:
+            parts = _re_fn.split(r"(?<=[.!?])\s+", c, maxsplit=1)
+            title = parts[0]
+            if len(parts) > 1 and len(parts[1]) >= 8:
+                rest.append(parts[1])
+        elif c != title:
+            rest.append(c)
+        if len(" ".join(rest)) > 400:
+            break
+    if not title:
+        stem = rel.rsplit("/", 1)[-1]
+        stem = stem[:-3] if stem.endswith(".md") else stem
+        title = _re_fn.sub(r"^\d{4}-\d{2}-\d{2}-", "", stem).replace("-", " ")
+    title = title.rstrip(" .")
+    post = " ".join(rest)
+    summary = media_sum or (post if len(post) >= 40 else "") or img_sum or post
+    if summary.lower().startswith(title.lower()[:40]):
+        summary = summary[len(title):].strip(" .—-:")
+    return {"title": _fn_cut(title, 140), "summary": _fn_cut(summary, 400)}
+
+
+def _fn_desc(rel: str, n: int = 300) -> str:
+    """Описание заметки в 2–4 строки — из её собственных полей (резюме конвейера / текст поста)."""
+    d = _fn_digest(rel)
+    stem = rel.rsplit("/", 1)[-1][:-3]
+    title, summ = d["title"].rstrip("…"), d["summary"]
+    stem_words = _re_fn.sub(r"^\d{4}-\d{2}-\d{2}-", "", stem).replace("-", " ").lower()
+    parts = []
+    if title and title.lower() != stem_words:
+        parts.append(title.rstrip(" ."))
+    if summ:
+        parts.append(summ)
+    if len(parts) == 2 and parts[0][-1:] in "?!…:":
+        desc = parts[0] + " " + parts[1]
+    else:
+        desc = ". ".join(parts).strip()
+    return _fn_cut(desc, n) if desc else "(в заметке нет текста — только медиа или ссылка)"
 
 
 def note_pass(rel_path, props, body, stem):
@@ -157,6 +277,8 @@ def index_pass(qh):
             continue
         if p.name == "_index.md":
             continue
+        if re.match(r"^Inbox/[^/]+/(Search|Status|Trash)/", rel):
+            continue  # служебные заметки поиска/статуса — не индексируем (2026-11-07)
         try:
             st = p.stat()
         except OSError:

@@ -14,6 +14,8 @@ volumes:
   tg-cache:
   tg-staging:
   mirror-vault:
+  mcp-logs:
+  bm25-state:
   # neo4j-data:  # (запланировано: графовый слой — см. блок ниже и ARCHITECTURE.md)
 
 services:
@@ -120,6 +122,7 @@ services:
       - MIRROR_DIR=/mirror
       - TEI_URL=http://tei:80
       - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-vault_main}
     volumes:
       - mirror-vault:/mirror
     depends_on: [qdrant, tei]
@@ -148,6 +151,68 @@ services:
       iptables -C INPUT $$R2 2>/dev/null || iptables -I INPUT 3 $$R2;
       iptables -C INPUT $$R3 2>/dev/null || iptables -I INPUT 4 $$R3;
       echo RULES-APPLIED; while true; do sleep 3600; done"
+
+  # ── Память для ИИ-агентов: memory-MCP + словесный индекс BM25 (v0.2.0) ──────
+  # Сервер MCP даёт агентам (opencode / Hermes / Claude …) поиск и чтение всего
+  # зеркала vault, а запись — ТОЛЬКО в свою зону Inbox/<агент>/.
+  # Наружу — только через реверс-прокси с токеном: vps/caddy/memory-mcp.caddy.example.
+  # Подробно: vps/mcp/README.md и docs/runbooks/runbook-memory-mcp.md.
+  mcp:
+    build: ./mcp
+    image: memory-mcp:latest
+    container_name: memory_mcp
+    restart: unless-stopped
+    environment:
+      - VAULT_PATH=/vault
+      - INBOX_PREFIX=Inbox/AI/            # зона записи этого агента
+      - AUDIT_LOG=/var/log/memory-mcp/audit.log
+      - MCP_PORT=8765
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - TEI_URL=http://tei:80
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-vault_main}
+      - QDRANT_BM25_COLLECTION=${QDRANT_BM25_COLLECTION:-vault_bm25}
+      - EXPAND_URL=${EXPAND_URL}
+      - EXPAND_MODELS=${EXPAND_MODELS}
+      - SUMMARY_MODEL=${SUMMARY_MODEL}
+      - OBSIDIAN_VAULT_NAME=${OBSIDIAN_VAULT_NAME:-Obsidian Vault}
+      - OBSIDIAN_BRIDGE=${OBSIDIAN_BRIDGE}
+    volumes:
+      - mirror-vault:/vault
+      - mcp-logs:/var/log/memory-mcp
+      - ./secrets/mcp-llm-key:/llm-key:ro   # ключи LLM для расширения запроса/обобщения, по одному в строке
+    ports:
+      - "127.0.0.1:8765:8765"               # только localhost; наружу — через прокси с токеном
+    depends_on: [qdrant, tei]
+    networks: [memnet]
+
+  # Второй агент = второй экземпляр того же образа со СВОЕЙ зоной записи и своим логом.
+  # mcp_hermes:
+  #   image: memory-mcp:latest
+  #   container_name: memory_mcp_hermes
+  #   restart: unless-stopped
+  #   environment: (как у mcp, но INBOX_PREFIX=Inbox/Hermes/ и AUDIT_LOG=…/audit-hermes.log)
+  #   volumes: (как у mcp)
+  #   ports: ["127.0.0.1:8766:8765"]
+  #   networks: [memnet]
+
+  bm25:
+    # словесный индекс (BM25, русская/английская морфология): заметка = одна точка в Qdrant
+    image: memory-mcp:latest
+    container_name: memory_bm25
+    restart: unless-stopped
+    command: ["python", "-m", "src.bm25_indexer"]
+    environment:
+      - VAULT_PATH=/vault
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_BM25_COLLECTION=${QDRANT_BM25_COLLECTION:-vault_bm25}
+      - BM25_INTERVAL=300
+    volumes:
+      - mirror-vault:/vault:ro
+      - bm25-state:/state
+    depends_on: [mcp, qdrant]
+    networks: [memnet]
 
   # ── ЗАПЛАНИРОВАНО (следующая версия): графовый слой ────────────────────────
   # Включение: раскомментировать блок + добавить NEO4J_PASSWORD в .env.

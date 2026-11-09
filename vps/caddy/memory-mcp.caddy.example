@@ -1,0 +1,53 @@
+# Memory-MCP за Caddy: доступ ТОЛЬКО с токеном. Скопируйте в свой Caddyfile (или addon-файл),
+# замените mcp.YOUR-DOMAIN и пути. Токен держите в отдельном файле-сниппете (chmod 600),
+# а не в этом конфиге и не в git.
+#
+# mcp-auth.snippet (пример содержимого, ДВЕ строки; значения — свои длинные случайные):
+#   @mcp_authorized header Authorization "Bearer <ДЛИННЫЙ-СЛУЧАЙНЫЙ-ТОКЕН>"
+#   @connector_path path /c/<ДЛИННЫЙ-СЛУЧАЙНЫЙ-СЕКРЕТ>/mcp
+# Сгенерировать: openssl rand -hex 32
+
+mcp.YOUR-DOMAIN {
+    log {
+        output file /data/logs/mcp-access.log {
+            roll_size 20MiB
+            roll_keep 10
+        }
+        format filter {
+            wrap json
+            # секретный путь не попадает в лог
+            request>uri regexp "^/c/[^/]+/" "/c/<SECRET>/"
+        }
+    }
+    import /etc/caddy/addons/mcp-auth.snippet
+
+    # https-переходник «открыть в Obsidian»: /o?<путь заметки без .md, url-encoded>
+    # Статичная страница (obsidian-open.html), содержимого заметок не раскрывает.
+    handle /o {
+        root * /etc/caddy/addons/www
+        rewrite * /obsidian-open.html
+        file_server
+    }
+    handle /health {
+        reverse_proxy memory_mcp:8765
+    }
+    # mcp-remote делает OAuth-discovery — ему нужен 404, а не 401
+    handle /.well-known/* {
+        respond 404
+    }
+    # (необязательно) клиент, который не умеет слать заголовки (например, коннектор в веб-чате):
+    # секретный путь → отдельный экземпляр сервера со своей зоной записи
+    handle @connector_path {
+        rewrite * /mcp?{query}
+        reverse_proxy memory_mcp_connector:8765
+    }
+    # основной доступ: только с заголовком Authorization: Bearer <токен>
+    handle @mcp_authorized {
+        reverse_proxy memory_mcp:8765 {
+            header_up -Authorization
+        }
+    }
+    handle {
+        respond "Unauthorized" 401
+    }
+}

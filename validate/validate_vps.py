@@ -12,6 +12,7 @@ import os
 import subprocess
 import time
 import sys
+import urllib.error
 import urllib.request
 
 PASS, FAIL = [], []
@@ -27,8 +28,8 @@ def fail(msg, hint=''):
     print('[FAIL]', msg, (f'→ {hint}' if hint else ''))
 
 
-def warn(msg):
-    print('[WARN]', msg)
+def warn(msg, hint=''):
+    print('[WARN]', msg, (f'→ {hint}' if hint else ''))
 
 
 def sh(cmd, timeout=30):
@@ -46,6 +47,8 @@ def main():
     ap.add_argument('--db-name', default=os.environ.get('COUCH_DB_NAME', ''))
     ap.add_argument('--mirror-dir', default=os.environ.get('MIRROR_DIR',
                    '/srv/memory-system/vault/memory-ai'))
+    ap.add_argument('--mcp-url', default=os.environ.get('MCP_PUBLIC_URL', ''),
+                    help='внешний адрес сервера памяти, напр. https://mcp.YOUR-DOMAIN (проверка «без токена → 401»)')
     args = ap.parse_args()
 
     # 1. docker
@@ -147,6 +150,33 @@ def main():
                           ('watchdog.sh', 'cron: watchdog'),
                           ('sync-whitelist.sh', 'cron: авто-whitelist')):
         (ok if needle in out else warn)(label)
+
+    # 11. память для ИИ-агентов (memory-MCP + BM25)
+    rc, out, _ = sh(['curl', '-s', 'http://127.0.0.1:8765/health'])
+    (ok if '"ok"' in out else fail)('memory-MCP /health',
+                                    'docs/runbooks/runbook-memory-mcp.md')
+    probe = ("import os,json,urllib.request as u;"
+             "h={'api-key':os.environ.get('QDRANT_API_KEY','')};"
+             "q=os.environ.get('QDRANT_URL','http://qdrant:6333');"
+             "r=lambda c: json.load(u.urlopen(u.Request(q+'/collections/'+c,headers=h)))['result']['points_count'];"
+             "print(r(os.environ.get('QDRANT_COLLECTION','vault_main')), r(os.environ.get('QDRANT_BM25_COLLECTION','vault_bm25')))")
+    rc, out, _ = sh(['docker', 'exec', 'memory_mcp', 'python', '-c', probe], timeout=30)
+    try:
+        dense, sparse = (int(x) for x in out.split())
+        (ok if dense > 0 else fail)(f'смысловая коллекция: {dense} кусков', 'индексатор пишет в QDRANT_COLLECTION?')
+        (ok if sparse > 0 else fail)(f'словесная коллекция (BM25): {sparse} заметок', 'контейнер memory_bm25 запущен?')
+    except Exception:
+        fail('коллекции Qdrant не прочитаны из memory_mcp', 'QDRANT_API_KEY / имена коллекций')
+    if args.mcp_url:
+        try:
+            urllib.request.urlopen(args.mcp_url.rstrip('/') + '/mcp', timeout=15)
+            fail('сервер памяти снаружи отвечает БЕЗ токена', 'vps/caddy/memory-mcp.caddy.example')
+        except urllib.error.HTTPError as e:
+            (ok if e.code == 401 else warn)(f'снаружи без токена → {e.code}')
+        except Exception as e:
+            warn(f'внешний адрес сервера памяти недоступен: {type(e).__name__}')
+    else:
+        warn('проверка «без токена → 401» пропущена (--mcp-url не задан)')
 
     print('──────────────────────────')
     print(f'ИТОГО: OK={len(PASS)} FAIL={len(FAIL)}')

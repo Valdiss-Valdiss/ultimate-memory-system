@@ -27,6 +27,8 @@
 | qdrant | ~70–300 MiB (растёт с числом векторов) |
 | tg_bot + tg_media + tgapi | ~80 MiB суммарно |
 | indexer | ~75 MiB |
+| memory-MCP (каждый экземпляр-агент) | ~40–80 MiB |
+| bm25 (словесный индекс) | ~20–50 MiB |
 | netguard | ~1 MiB |
 | ОС + Docker | ~0.5–1 GiB |
 | **Итого (штатно)** | **~4.5–5 GiB; пики ~7–8 GiB** |
@@ -125,7 +127,8 @@ Env индексера/конвейера выставить на их URL/кл�
 ## Мини-стек vs полный стек
 
 `docker-compose.yml` — минимально достаточный набор Memory System:
-couchdb, qdrant, tei, docling, tgapi, tg_bot, tg_media, indexer, netguard.
+couchdb, qdrant, tei, docling, tgapi, tg_bot, tg_media, indexer, netguard,
+mcp (сервер памяти для ИИ-агентов), bm25 (словесный индекс).
 Стек самодостаточен: перечисленные сервисы — всё, что нужно конвейеру памяти.
 Другие сервисы (CMS, автоматизации и т.п.) не требуются и могут жить на соседних
 инстансах независимо.

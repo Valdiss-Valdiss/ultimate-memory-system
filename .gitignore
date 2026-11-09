@@ -8,6 +8,8 @@
 *.pem
 id_*
 .ssh/
+secrets/
+mcp-auth.snippet
 session/
 session*/
 

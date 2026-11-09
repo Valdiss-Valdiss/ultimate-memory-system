@@ -1,0 +1,16 @@
+{
+ "рецепты домашнего хлеба": {
+  "Food/sourdough-starter.md": 2,
+  "Food/bread-machine-tips.md": 2,
+  "Food/baking-basics.md": 1
+ },
+ "настройка роутера": {
+  "IT/router-setup-guide.md": 2,
+  "IT/home-network.md": 1
+ },
+ "how to learn Spanish": {
+  "Languages/spanish-podcasts.md": 2,
+  "Languages/anki-decks.md": 1,
+  "Languages/ai-tutor-apps.md": 1
+ }
+}

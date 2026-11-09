@@ -23,7 +23,8 @@ CouchDB (E2E-шифрованная синхронизация LiveSync) и Tele
 2. ПК: Obsidian → LiveSync → E2E-vault → re-setup устройств (runbook-obsidian-livesync.md)
 3. Telegram: bot-токен, user-session, каналы, folders.yaml (runbook-telegram-import.md)
 4. ПК-конвейер: часовая задача + стражи + validate (pc-scripts/README.md)
-5. Приёмка: validate всё зелёное → тестовый пост → заметка в папке → готово.
+5. Память для ИИ-агентов: memory-MCP + BM25 + токен на прокси + навыки агентов (runbook-memory-mcp.md)
+5а. Приёмка: validate всё зелёное → тестовый пост → заметка в папке → «найди …» у агента → готово.
 6. Периодически: снапшоты, STATUS, чистка очередей (runbook-snapshots.md)
 ```
 

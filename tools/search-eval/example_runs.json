@@ -1,0 +1,34 @@
+{
+ "current": {
+  "рецепты домашнего хлеба": [
+   "Food/baking-basics.md",
+   "Food/sourdough-starter.md",
+   "IT/random.md"
+  ],
+  "настройка роутера": [
+   "IT/home-network.md",
+   "IT/random.md",
+   "IT/router-setup-guide.md"
+  ],
+  "how to learn Spanish": [
+   "Languages/ai-tutor-apps.md",
+   "Languages/other.md"
+  ]
+ },
+ "with-expansion": {
+  "рецепты домашнего хлеба": [
+   "Food/sourdough-starter.md",
+   "Food/bread-machine-tips.md",
+   "Food/baking-basics.md"
+  ],
+  "настройка роутера": [
+   "IT/router-setup-guide.md",
+   "IT/home-network.md"
+  ],
+  "how to learn Spanish": [
+   "Languages/spanish-podcasts.md",
+   "Languages/anki-decks.md",
+   "Languages/ai-tutor-apps.md"
+  ]
+ }
+}
